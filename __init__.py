@@ -177,6 +177,36 @@ if scheduler_name not in SCHEDULER_HANDLERS:
     if scheduler_name not in SCHEDULER_NAMES:
         SCHEDULER_NAMES.append(scheduler_name)
 
+def radiance_shift_scheduler(model_sampling, steps, power=2.4, midpoint_shift=0.98, discard_penultimate=True):
+    total_timesteps = (len(model_sampling.sigmas) - 1)
+    real_steps = steps + 1
+    x = numpy.linspace(0, 1, real_steps, endpoint=False)
+    x = x**midpoint_shift
+
+    ts_normalized = (1 - x**power)**power
+    ts = numpy.rint(ts_normalized * total_timesteps)
+
+    sigs = []
+    last_t = -1
+    for t in ts:
+        t_int = min(int(t), total_timesteps)
+        if t_int != last_t:
+            sigs.append(float(model_sampling.sigmas[t_int]))
+        last_t = t_int
+
+    sigs.append(0.0)
+    if discard_penultimate is True:
+        sigmas = torch.FloatTensor(sigs)
+        return torch.cat((sigmas[:-2], sigmas[-1:]))
+    else:
+        return torch.FloatTensor(sigs)
+
+scheduler_name = "radiance_shift"
+if scheduler_name not in SCHEDULER_HANDLERS:
+    scheduler_handler = SchedulerHandler(handler=radiance_shift_scheduler, use_ms=True)
+    SCHEDULER_HANDLERS[scheduler_name] = scheduler_handler
+    if scheduler_name not in SCHEDULER_NAMES:
+        SCHEDULER_NAMES.append(scheduler_name)
 
 NODE_CLASS_MAPPINGS = {
     "PowerShiftScheduler": PowerShiftSchedulerNode,
