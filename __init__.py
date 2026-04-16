@@ -53,6 +53,50 @@ if scheduler_name not in SCHEDULER_HANDLERS:
         SCHEDULER_NAMES.append(scheduler_name)
 
 
+def beta_53_scheduler(model_sampling, steps, alpha=0.5, beta=0.3):
+    total_timesteps = (len(model_sampling.sigmas) - 1)
+    ts = 1 - numpy.linspace(0, 1, steps, endpoint=False)
+    ts = numpy.rint(scipy.stats.beta.ppf(ts, alpha, beta) * total_timesteps)
+
+    sigs = []
+    last_t = -1
+    for t in ts:
+        if t != last_t:
+            sigs += [float(model_sampling.sigmas[int(t)])]
+        last_t = t
+    sigs += [0.0]
+    return torch.FloatTensor(sigs)
+
+scheduler_name = "beta_53"
+if scheduler_name not in SCHEDULER_HANDLERS:
+    scheduler_handler = SchedulerHandler(handler=beta_53_scheduler, use_ms=True)
+    SCHEDULER_HANDLERS[scheduler_name] = scheduler_handler
+    if scheduler_name not in SCHEDULER_NAMES:
+        SCHEDULER_NAMES.append(scheduler_name)
+
+
+def beta_54_scheduler(model_sampling, steps, alpha=0.5, beta=0.4):
+    total_timesteps = (len(model_sampling.sigmas) - 1)
+    ts = 1 - numpy.linspace(0, 1, steps, endpoint=False)
+    ts = numpy.rint(scipy.stats.beta.ppf(ts, alpha, beta) * total_timesteps)
+
+    sigs = []
+    last_t = -1
+    for t in ts:
+        if t != last_t:
+            sigs += [float(model_sampling.sigmas[int(t)])]
+        last_t = t
+    sigs += [0.0]
+    return torch.FloatTensor(sigs)
+
+scheduler_name = "beta_54"
+if scheduler_name not in SCHEDULER_HANDLERS:
+    scheduler_handler = SchedulerHandler(handler=beta_54_scheduler, use_ms=True)
+    SCHEDULER_HANDLERS[scheduler_name] = scheduler_handler
+    if scheduler_name not in SCHEDULER_NAMES:
+        SCHEDULER_NAMES.append(scheduler_name)
+
+
 def beta_57_scheduler(model_sampling, steps, alpha=0.5, beta=0.7):
     total_timesteps = (len(model_sampling.sigmas) - 1)
     ts = 1 - numpy.linspace(0, 1, steps, endpoint=False)
@@ -97,6 +141,28 @@ if scheduler_name not in SCHEDULER_HANDLERS:
     if scheduler_name not in SCHEDULER_NAMES:
         SCHEDULER_NAMES.append(scheduler_name)
 
+
+def beta_43_scheduler(model_sampling, steps, alpha=0.4, beta=0.3):
+    steps = modify_by_twenties(steps)
+    total_timesteps = (len(model_sampling.sigmas) - 1)
+    ts = 1 - numpy.linspace(0, 1, steps, endpoint=False)
+    ts = numpy.rint(scipy.stats.beta.ppf(ts, alpha, beta) * total_timesteps)
+
+    sigs = []
+    last_t = -1
+    for t in ts:
+        if t != last_t:
+            sigs += [float(model_sampling.sigmas[int(t)])]
+        last_t = t
+    sigs += [0.0]
+    return torch.FloatTensor(sigs)
+
+scheduler_name = "beta_43"
+if scheduler_name not in SCHEDULER_HANDLERS:
+    scheduler_handler = SchedulerHandler(handler=beta_43_scheduler, use_ms=True)
+    SCHEDULER_HANDLERS[scheduler_name] = scheduler_handler
+    if scheduler_name not in SCHEDULER_NAMES:
+        SCHEDULER_NAMES.append(scheduler_name)
 
 def beta_42_scheduler(model_sampling, steps, alpha=0.4, beta=0.2):
     steps = modify_by_tens(steps)
