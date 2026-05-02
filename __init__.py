@@ -1,13 +1,30 @@
 import torch
 import numpy
 import scipy.stats
+from scipy.interpolate import PchipInterpolator
 from comfy.samplers import SchedulerHandler, SCHEDULER_HANDLERS, SCHEDULER_NAMES
+
 
 def modify_by_twenties(num: int) -> int:
     return num + (num // 20)
 
 def modify_by_tens(num: int) -> int:
     return num + (num // 10)
+
+def parse_float_list(s: str):
+    return [float(x.strip()) for x in s.split(",") if x.strip()]
+
+BASE_SIGMA_POINTS = [
+    1.0,
+    0.99375,
+    0.9875,
+    0.98125,
+    0.975,
+    0.909375,
+    0.725,
+    0.421875,
+]
+
 
 def beta_33_scheduler(model_sampling, steps, alpha=0.3, beta=0.3):
     total_timesteps = (len(model_sampling.sigmas) - 1)
@@ -248,6 +265,89 @@ if scheduler_name not in SCHEDULER_HANDLERS:
     if scheduler_name not in SCHEDULER_NAMES:
         SCHEDULER_NAMES.append(scheduler_name)
 
+
+def sigma_curve_scheduler(model_sampling, steps, discard_penultimate=False, sigma_points=BASE_SIGMA_POINTS):
+    """
+    Interpolates a sigma schedule from sigma_points to an arbitrary number
+    of steps, then appends a final 0.0 sigma.
+
+    For steps == 8, this reproduces exactly:
+    1.0
+    0.99375
+    0.9875
+    0.98125
+    0.975
+    0.909375
+    0.725
+    0.421875
+    0.0
+    """
+
+    base = numpy.array(sigma_points, dtype=numpy.float32)
+    n_base = len(base)  # 8 points
+
+    # Curve is defined over indices [0, n_base-1]
+    x_base = numpy.linspace(0.0, float(n_base - 1), n_base)
+    # We want exactly `steps` curve points (excluding the final 0.0)
+    x_new = numpy.linspace(0.0, float(n_base - 1), steps)
+
+    curve_sigs = numpy.interp(x_new, x_base, base).astype(numpy.float32)
+
+    # Append terminal 0.0 (not part of the curve shape)
+    sigs = numpy.concatenate([curve_sigs, numpy.array([0.0], dtype=numpy.float32)])
+
+    if discard_penultimate:
+        sigs_t = torch.from_numpy(sigs)
+        return torch.cat((sigs_t[:-2], sigs_t[-1:]))
+
+    return torch.from_numpy(sigs)
+
+scheduler_name = "sigma_curve_from_points"
+
+if scheduler_name not in SCHEDULER_HANDLERS:
+    scheduler_handler = SchedulerHandler(handler=sigma_curve_scheduler, use_ms=True)
+    SCHEDULER_HANDLERS[scheduler_name] = scheduler_handler
+    if scheduler_name not in SCHEDULER_NAMES:
+        SCHEDULER_NAMES.append(scheduler_name)
+
+def sigma_curve_pchip_scheduler(model_sampling, steps, discard_penultimate=False, sigma_points=BASE_SIGMA_POINTS):
+    """
+    PCHIP monotonic cubic Hermite spline over sigma_points.
+    Produces `steps` curve points + final 0.0.
+    """
+
+    base = numpy.array(sigma_points, dtype=numpy.float32)
+    n_base = len(base)
+
+    # Domain for the base curve: 0 .. n_base-1
+    x_base = numpy.linspace(0.0, float(n_base - 1), n_base)
+
+    # Domain for the new curve: steps points
+    x_new = numpy.linspace(0.0, float(n_base - 1), steps)
+
+    # PCHIP spline (monotonic, no overshoot)
+    pchip = PchipInterpolator(x_base, base)
+    curve_sigs = pchip(x_new).astype(numpy.float32)
+
+    # Append terminal 0.0
+    sigs = numpy.concatenate([curve_sigs, numpy.array([0.0], dtype=numpy.float32)])
+
+    if discard_penultimate:
+        sigs_t = torch.from_numpy(sigs)
+        return torch.cat((sigs_t[:-2], sigs_t[-1:]))
+
+    return torch.from_numpy(sigs)
+
+
+scheduler_name = "sigma_curve_pchip"
+
+if scheduler_name not in SCHEDULER_HANDLERS:
+    scheduler_handler = SchedulerHandler(handler=sigma_curve_pchip_scheduler, use_ms=True)
+    SCHEDULER_HANDLERS[scheduler_name] = scheduler_handler
+    if scheduler_name not in SCHEDULER_NAMES:
+        SCHEDULER_NAMES.append(scheduler_name)
+
+
 class PowerShiftSchedulerNode:
     @classmethod
     def INPUT_TYPES(s):
@@ -304,11 +404,104 @@ class RadianceShiftSchedulerNode:
         return (sigmas, )
 
 
+class SigmaCurveFromPointsSchedulerNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "steps": ("INT", {"default": 8, "min": 1, "max": 1000}),
+                "discard_penultimate": ("BOOLEAN", {"default": False}),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+            },
+            "optional": {
+                "custom_points": ("STRING", {
+                    "multiline": False,
+                    "tooltip": "sigma curve points provided as comma separated list of floats. e.g. '1.0, 0.9, 0.8' etc."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("SIGMAS",)
+    CATEGORY = "sampling/custom_sampling/schedulers"
+    FUNCTION = "get_sigmas"
+
+    def get_sigmas(self, model, steps, discard_penultimate, denoise, custom_points=None):
+        total_steps = steps
+        if 0.0 < denoise < 1.0:
+            total_steps = int(steps / denoise)
+
+        if custom_points is not None:
+            sigma_points = parse_float_list(custom_points)
+            if len(sigma_points) < 2:
+                sigma_points = BASE_SIGMA_POINTS
+        else:
+            sigma_points = BASE_SIGMA_POINTS
+
+        sigmas = sigma_curve_scheduler(
+            model.get_model_object("model_sampling"),
+            total_steps,
+            discard_penultimate=discard_penultimate,
+            sigma_points=sigma_points,
+        ).cpu()
+
+        sigmas = sigmas[-(steps + 1):]
+        return (sigmas,)
+
+class SigmaCurvePchipSchedulerNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "steps": ("INT", {"default": 8, "min": 1, "max": 2000}),
+                "discard_penultimate": ("BOOLEAN", {"default": False}),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+            },
+            "optional": {
+                "custom_points": ("STRING", {
+                    "multiline": False,
+                    "tooltip": "sigma curve points provided as comma separated list of floats. e.g. '1.0, 0.9, 0.8'"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("SIGMAS",)
+    CATEGORY = "sampling/custom_sampling/schedulers"
+    FUNCTION = "get_sigmas"
+
+    def get_sigmas(self, model, steps, discard_penultimate, denoise, custom_points=None):
+        total_steps = steps
+        if 0.0 < denoise < 1.0:
+            total_steps = int(steps / denoise)
+
+        if custom_points is not None:
+            sigma_points = parse_float_list(custom_points)
+            if len(sigma_points) < 2:
+                sigma_points = BASE_SIGMA_POINTS
+        else:
+            sigma_points = BASE_SIGMA_POINTS
+
+        sigmas = sigma_curve_pchip_scheduler(
+            model.get_model_object("model_sampling"),
+            total_steps,
+            discard_penultimate=discard_penultimate,
+            sigma_points=sigma_points,
+        ).cpu()
+
+        sigmas = sigmas[-(steps + 1):]
+        return (sigmas,)
+
+
 NODE_CLASS_MAPPINGS = {
     "PowerShiftScheduler": PowerShiftSchedulerNode,
     "RadianceShiftScheduler": RadianceShiftSchedulerNode,
+    "SigmaCurveFromPointsScheduler": SigmaCurveFromPointsSchedulerNode,
+    "SigmaCurvePchipScheduler": SigmaCurvePchipSchedulerNode,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PowerShiftScheduler": "Power Shift Scheduler",
     "RadianceShiftScheduler": "Radiance Shift Scheduler",
+    "SigmaCurveFromPointsScheduler": "From Points Scheduler",
+    "SigmaCurvePchipScheduler": "PCHIP Scheduler",
 }
